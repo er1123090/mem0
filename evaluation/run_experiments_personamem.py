@@ -228,19 +228,6 @@ class PersonaMemUploader:
     @staticmethod
     def _normalise_record_container(parsed: object) -> Iterator[Dict[str, object]]:
         if isinstance(parsed, dict):
-            has_known_structure = any(
-                key in parsed
-                for key in (
-                    "shared_context_id",
-                    "context_id",
-                    "id",
-                    "messages",
-                    "context",
-                    "turns",
-                    "conversation",
-                    "conversations",
-                )
-            )
             for key in ("data", "contexts", "records", "items"):
                 value = parsed.get(key)
                 if isinstance(value, list):
@@ -248,18 +235,6 @@ class PersonaMemUploader:
                         if isinstance(item, dict):
                             yield item
                     return
-            if not has_known_structure:
-                for context_id, value in parsed.items():
-                    if not isinstance(context_id, str):
-                        continue
-                    record: Dict[str, object]
-                    if isinstance(value, dict):
-                        record = dict(value)
-                    else:
-                        record = {"context": value}
-                    record.setdefault("shared_context_id", context_id)
-                    yield record
-                return
             yield parsed
             return
 
@@ -410,9 +385,6 @@ class PersonaMemUploader:
             if content:
                 message = {"role": role, "content": content}
                 self._apply_speaker_metadata(message, speaker_name, speaker_registry)
-                if "speaker_id" not in message:
-                    inferred = self._infer_speaker_from_content(content)
-                    self._apply_speaker_metadata(message, inferred, speaker_registry)
                 direct_messages.append(message)
 
             combined: List[Dict[str, object]] = []
@@ -428,9 +400,6 @@ class PersonaMemUploader:
                 return []
             message = {"role": "user", "content": content}
             self._apply_speaker_metadata(message, parent_speaker, speaker_registry)
-            if "speaker_id" not in message:
-                inferred = self._infer_speaker_from_content(content)
-                self._apply_speaker_metadata(message, inferred, speaker_registry)
             return [message]
 
         text = self._stringify(turn)
@@ -438,9 +407,6 @@ class PersonaMemUploader:
             return []
         message = {"role": "user", "content": text}
         self._apply_speaker_metadata(message, parent_speaker, speaker_registry)
-        if "speaker_id" not in message:
-            inferred = self._infer_speaker_from_content(text)
-            self._apply_speaker_metadata(message, inferred, speaker_registry)
         return [message]
 
     def _resolve_role(self, turn: Dict[str, object]) -> str:
@@ -486,17 +452,9 @@ class PersonaMemUploader:
         if not key:
             return None
 
-        if key in speaker_registry:
-            return speaker_registry[key]
-
-        if key in self._global_speaker_registry:
-            speaker_id = self._global_speaker_registry[key]
-        else:
-            speaker_id = self._generate_speaker_id(speaker_name, self._global_speaker_registry.values())
-            self._global_speaker_registry[key] = speaker_id
-
-        speaker_registry[key] = speaker_id
-        return speaker_id
+        if key not in speaker_registry:
+            speaker_registry[key] = self._generate_speaker_id(speaker_name, speaker_registry.values())
+        return speaker_registry[key]
 
     @staticmethod
     def _normalise_speaker_key(speaker_name: str) -> str:
@@ -523,37 +481,6 @@ class PersonaMemUploader:
     def _looks_like_role(value: str) -> bool:
         lowered = value.casefold()
         return any(alias in lowered for alias in ("system", "assistant", "bot", "model", "ai", "user"))
-
-    @staticmethod
-    def _infer_speaker_from_content(content: str) -> Optional[str]:
-        if not content:
-            return None
-
-        name_pattern = re.compile(r"\bname\s*[:=]\s*(.+)", re.IGNORECASE)
-        for line in content.splitlines():
-            match = name_pattern.search(line)
-            if not match:
-                continue
-            candidate = match.group(1).strip()
-            if not candidate:
-                continue
-            candidate = re.split(r"[\r\n]|\s{2,}|[,;]|\\n", candidate)[0].strip()
-            for stop_token in (
-                "gender",
-                "age",
-                "location",
-                "identity",
-                "occupation",
-                "profession",
-                "hobby",
-                "hobbies",
-            ):
-                token_index = candidate.lower().find(stop_token)
-                if token_index > 0:
-                    candidate = candidate[:token_index].strip()
-            if candidate:
-                return candidate
-        return None
 
     def _resolve_content(self, turn: Dict[str, object]) -> str:
         for key in _CONTENT_KEYS:
