@@ -31,10 +31,10 @@ run-openai:
 	python run_experiments.py --technique_type openai --output_folder results/
 
 run-personamem-add:
-	python run_experiments_personamem.py --questions-file /data/minseo/mem0/evaluation/dataset/PersonaMem/questions_32k.csv --contexts-file /data/minseo/mem0/evaluation/dataset/PersonaMem/shared_contexts_32k.jsonl
+	python run_experiments_personamem-no_speakerid.py --questions-file /data/minseo/mem0/evaluation/dataset/PersonaMem/questions_32k.csv --contexts-file /data/minseo/mem0/evaluation/dataset/PersonaMem/shared_contexts_32k-short.jsonl
 
 run-personamem-dry-run:
 	python run_experiments_personamem.py --questions-file /data/minseo/mem0/evaluation/dataset/PersonaMem/questions_32k.csv --contexts-file /data/minseo/mem0/evaluation/dataset/PersonaMem/shared_contexts_32k.jsonl --dry-run
-	
+
 run-openai-locomo:
 	python run_experiments_locomo.py --technique_type openai --output_folder results/
