@@ -1,7 +1,7 @@
 
 # Run the experiments
 run-mem0-add-locomo:
-	python run_experiments_locomo_locomo.py --technique_type mem0 --method add
+	python run_experiments_locomo.py --technique_type mem0 --method add
 
 run-mem0-search-locomo:
 	python run_experiments_locomo.py --technique_type mem0 --method search --output_folder results/ --top_k 30
@@ -31,9 +31,9 @@ run-openai:
 	python run_experiments.py --technique_type openai --output_folder results/
 
 run-personamem-add:
-	python run_experiments_personamem.py --questions-file dataset/PersonaMem/questions_32k.csv --contexts-file dataset/PersonaMem/shared_contexts_32k.jsonl
+	python run_experiments_personamem.py --questions-file /data/minseo/mem0/evaluation/dataset/PersonaMem/questions_32k.csv --contexts-file /data/minseo/mem0/evaluation/dataset/PersonaMem/shared_contexts_32k.jsonl
 
 run-personamem-dry-run:
-	python run_experiments_personamem.py --questions-file dataset/PersonaMem/questions_32k.csv --contexts-file dataset/PersonaMem/shared_contexts_32k.jsonl --dry-run
+	python run_experiments_personamem.py --questions-file /data/minseo/mem0/evaluation/dataset/PersonaMem/questions_32k.csv --contexts-file /data/minseo/mem0/evaluation/dataset/PersonaMem/shared_contexts_32k.jsonl --dry-run
 run-openai-locomo:
 	python run_experiments_locomo.py --technique_type openai --output_folder results/

@@ -64,7 +64,7 @@ class PersonaMemUploader:
             self._client = MemoryClient(
                 api_key=os.getenv("MEM0_API_KEY"),
                 org_id=os.getenv("MEM0_ORGANIZATION_ID"),
-                project_id=os.getenv("MEM0_PROJECT_ID"),
+                project_id=os.getenv("MEM0_PERSONAMEM_PROJECT_ID"),
             )
             self._client.update_project(custom_instructions=custom_instructions)
 
@@ -105,6 +105,7 @@ class PersonaMemUploader:
             print(
                 "Warning: %d shared contexts were referenced in the questions file but missing from the JSONL." % len(missing_contexts)
             )
+            print("Missing context IDs: %s" % ", ".join(missing_contexts))
 
     # ------------------------------------------------------------------
     # Data loading helpers
@@ -162,8 +163,10 @@ class PersonaMemUploader:
         missing = required - contexts.keys()
         if missing:
             print(
-                "Warning: %d contexts referenced in the questions file were not found in the JSONL file." % len(missing)
+                "***Warning: %d contexts referenced in the questions file were not found in the JSONL file." % len(missing)
             )
+
+        print(f"Loaded {len(contexts)} shared contexts from {self.config.contexts_path}")
 
         return contexts
 
@@ -328,6 +331,7 @@ def parse_args() -> PersonaMemConfig:
     parser.add_argument(
         "--enable-graph",
         action="store_true",
+        default=False,
         help="Enable graph mode when storing memories.",
     )
     parser.add_argument(
