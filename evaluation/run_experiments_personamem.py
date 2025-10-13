@@ -77,6 +77,7 @@ class PersonaMemUploader:
 
         self.config = config
         self._client: Optional[MemoryClient] = None
+        self._global_speaker_registry: Dict[str, str] = {}
 
         if not config.dry_run:
             self._client = MemoryClient(
@@ -165,15 +166,15 @@ class PersonaMemUploader:
         required = set(required_context_ids)
 
         for record in self._iterate_context_records(self.config.contexts_path):
-                context_id = self._extract_context_id(record)
-                if not context_id:
-                    continue
+            context_id = self._extract_context_id(record)
+            if not context_id:
+                continue
 
-                if context_id not in contexts:
-                    contexts[context_id] = record
+            if context_id not in contexts:
+                contexts[context_id] = record
 
-                if required and required.issubset(contexts.keys()):
-                    break
+            if required and required.issubset(contexts.keys()):
+                break
 
         missing = required - contexts.keys()
         if missing:
