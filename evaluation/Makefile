@@ -29,3 +29,12 @@ run-zep-search:
 
 run-openai:
 	python run_experiments.py --technique_type openai --output_folder results/
+
+run-personamem-add:
+        python run_experiments_personamem.py --method add --questions-file dataset/PersonaMem/questions_32k.csv --contexts-file dataset/PersonaMem/shared_contexts_32k.jsonl
+
+run-personamem-dry-run:
+        python run_experiments_personamem.py --method add --questions-file dataset/PersonaMem/questions_32k.csv --contexts-file dataset/PersonaMem/shared_contexts_32k.jsonl --dry-run
+
+run-personamem-search:
+        python run_experiments_personamem.py --method search --questions-file dataset/PersonaMem/questions_32k.csv --contexts-file dataset/PersonaMem/shared_contexts_32k.jsonl --output-folder results --top-k 30
