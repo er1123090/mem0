@@ -1,9 +1,11 @@
-"""Upload the PersonaMem benchmark conversations to mem0.
+"""Upload the PersonaMem benchmark conversations to mem0 or run search evaluations.
 
 This script mirrors the behaviour of the existing Locomo uploader. It reads the
 PersonaMem question mapping (CSV) together with the shared contexts (JSONL),
 normalises every conversation into the format expected by mem0, and finally
-stores the conversations for each persona.
+stores the conversations for each persona. When executed with
+``--method search`` it mirrors the search workflow provided by
+``run_experiments`` for convenience.
 """
 
 from __future__ import annotations
@@ -12,8 +14,10 @@ import argparse
 import csv
 import json
 import os
+import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence
+from json import JSONDecodeError
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence
 
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -21,6 +25,14 @@ from tqdm import tqdm
 from mem0 import MemoryClient
 
 from src.memzero.add import custom_instructions
+from src.memzero.search import MemorySearch
+from src.utils import METHODS
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_QUESTIONS_PATH = os.path.join(_SCRIPT_DIR, "dataset", "PersonaMem", "questions_32k.csv")
+_DEFAULT_CONTEXTS_PATH = os.path.join(_SCRIPT_DIR, "dataset", "PersonaMem", "shared_contexts_32k.jsonl")
+_DEFAULT_SEARCH_DATA_FILE = os.path.join(_SCRIPT_DIR, "dataset", "Locomo", "locomo10.json")
+_DEFAULT_OUTPUT_FOLDER = os.path.join(_SCRIPT_DIR, "results")
 
 # Fields that commonly contain the conversation payload in PersonaMem contexts.
 _TURN_KEYS = (
@@ -49,6 +61,12 @@ class PersonaMemConfig:
     enable_graph: bool = False
     max_contexts: Optional[int] = None
     dry_run: bool = False
+    method: str = "add"
+    output_folder: str = _DEFAULT_OUTPUT_FOLDER
+    search_data_file: str = _DEFAULT_SEARCH_DATA_FILE
+    top_k: int = 30
+    filter_memories: bool = False
+    search_is_graph: bool = False
 
 
 class PersonaMemUploader:
@@ -99,6 +117,9 @@ class PersonaMemUploader:
                 continue
 
             metadata = {"shared_context_id": shared_context_id, "source": "PersonaMem"}
+            question = context_record.get("question")
+            if isinstance(question, str) and question.strip():
+                metadata["question"] = question.strip()
             self._add_messages(persona_id, messages, metadata)
 
         if missing_contexts:
@@ -143,13 +164,7 @@ class PersonaMemUploader:
         contexts: Dict[str, Dict[str, object]] = {}
         required = set(required_context_ids)
 
-        with open(self.config.contexts_path, "r", encoding="utf-8") as jsonl_file:
-            for line in jsonl_file:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                record = json.loads(line)
+        for record in self._iterate_context_records(self.config.contexts_path):
                 context_id = self._extract_context_id(record)
                 if not context_id:
                     continue
@@ -170,6 +185,145 @@ class PersonaMemUploader:
 
         return contexts
 
+    def _iterate_context_records(self, path: str) -> Iterator[Dict[str, object]]:
+        """Yield context records from JSON, JSONL, or lightly structured files."""
+
+        buffer = ""
+        lines: List[str] = []
+        any_record = False
+        with open(path, "r", encoding="utf-8") as json_file:
+            for raw_line in json_file:
+                lines.append(raw_line)
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+
+                buffer += raw_line
+
+                try:
+                    parsed = json.loads(buffer)
+                except JSONDecodeError:
+                    # The current buffer does not yet represent a full JSON object.
+                    continue
+
+                any_record = True
+                yield from self._normalise_record_container(parsed)
+                buffer = ""
+
+        if buffer.strip():
+            try:
+                parsed = json.loads(buffer)
+            except JSONDecodeError as exc:
+                if any_record:
+                    raise ValueError(f"Unable to parse contexts file '{path}'.") from exc
+                yield from self._parse_plaintext_context_content("".join(lines))
+                return
+            yield from self._normalise_record_container(parsed)
+            return
+
+        if not any_record:
+            yield from self._parse_plaintext_context_content("".join(lines))
+
+    @staticmethod
+    def _normalise_record_container(parsed: object) -> Iterator[Dict[str, object]]:
+        if isinstance(parsed, dict):
+            for key in ("data", "contexts", "records", "items"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            yield item
+                    return
+            yield parsed
+            return
+
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    yield item
+
+    def _parse_plaintext_context_content(self, content: str) -> Iterator[Dict[str, object]]:
+        """Fallback parser for simple key-value context files."""
+
+        records: List[Dict[str, object]] = []
+        current_record: Dict[str, object] = {}
+        current_context: List[Dict[str, object]] = []
+        current_entry: Optional[Dict[str, object]] = None
+        in_context = False
+
+        def flush_entry() -> None:
+            nonlocal current_entry
+            if current_entry:
+                current_context.append(current_entry)
+                current_entry = None
+
+        def flush_record() -> None:
+            nonlocal current_record, current_context, in_context
+            flush_entry()
+            if current_context:
+                current_record["context"] = list(current_context)
+            if current_record:
+                records.append(current_record)
+            current_record = {}
+            current_context = []
+            in_context = False
+
+        for raw_line in content.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            if stripped.startswith("---"):
+                flush_record()
+                continue
+
+            if in_context and stripped.startswith("-"):
+                flush_entry()
+                current_entry = {}
+                stripped = stripped[1:].strip()
+                if ":" in stripped:
+                    key, value = stripped.split(":", 1)
+                    current_entry[key.strip()] = value.strip()
+                continue
+
+            if ":" in stripped:
+                key, value = stripped.split(":", 1)
+                key = key.strip()
+                value = value.strip()
+
+                if in_context:
+                    if current_entry is None:
+                        current_entry = {}
+                    current_entry[key] = value
+                else:
+                    if key.lower() == "context":
+                        in_context = True
+                        if value:
+                            current_record["context"] = value
+                        continue
+                    current_record[key] = value
+                continue
+
+            if in_context:
+                if current_entry is None:
+                    current_entry = {"content": stripped}
+                else:
+                    existing = current_entry.get("content")
+                    if isinstance(existing, str) and existing:
+                        current_entry["content"] = f"{existing} {stripped}"
+                    else:
+                        current_entry["content"] = stripped
+            else:
+                current_record.setdefault("context", [])
+                context_value = current_record["context"]
+                if isinstance(context_value, list):
+                    context_value.append({"content": stripped})
+
+        flush_record()
+
+        for record in records:
+            yield record
+
     @staticmethod
     def _extract_context_id(record: Dict[str, object]) -> Optional[str]:
         for key in ("shared_context_id", "context_id", "id"):
@@ -181,7 +335,7 @@ class PersonaMemUploader:
     # ------------------------------------------------------------------
     # Conversation normalisation helpers
     # ------------------------------------------------------------------
-    def _normalise_context(self, context_record: Dict[str, object]) -> List[Dict[str, str]]:
+    def _normalise_context(self, context_record: Dict[str, object]) -> List[Dict[str, object]]:
         raw_turns: List[object] = []
 
         for key in _TURN_KEYS:
@@ -199,31 +353,40 @@ class PersonaMemUploader:
                         if isinstance(nested_value, list):
                             raw_turns.extend(nested_value)
 
-        messages: List[Dict[str, str]] = []
+        speaker_registry: Dict[str, str] = {}
+        messages: List[Dict[str, object]] = []
         for turn in raw_turns:
-            messages.extend(self._expand_turn(turn))
+            messages.extend(self._expand_turn(turn, speaker_registry))
 
         if not self.config.include_system:
             messages = [msg for msg in messages if msg["role"] != "system"]
 
         return messages
 
-    def _expand_turn(self, turn: object) -> List[Dict[str, str]]:
+    def _expand_turn(
+        self,
+        turn: object,
+        speaker_registry: Dict[str, str],
+        parent_speaker: Optional[str] = None,
+    ) -> List[Dict[str, object]]:
         if isinstance(turn, dict):
-            nested_messages: List[Dict[str, str]] = []
+            speaker_name = self._resolve_speaker_name(turn) or parent_speaker
+            nested_messages: List[Dict[str, object]] = []
             for key in _TURN_KEYS:
                 nested = turn.get(key)
                 if isinstance(nested, list):
                     for item in nested:
-                        nested_messages.extend(self._expand_turn(item))
+                        nested_messages.extend(self._expand_turn(item, speaker_registry, speaker_name))
 
             role = self._resolve_role(turn)
             content = self._resolve_content(turn)
-            direct_messages: List[Dict[str, str]] = []
+            direct_messages: List[Dict[str, object]] = []
             if content:
-                direct_messages.append({"role": role, "content": content})
+                message = {"role": role, "content": content}
+                self._apply_speaker_metadata(message, speaker_name, speaker_registry)
+                direct_messages.append(message)
 
-            combined: List[Dict[str, str]] = []
+            combined: List[Dict[str, object]] = []
             combined.extend(direct_messages)
             combined.extend(nested_messages)
             return combined
@@ -234,12 +397,16 @@ class PersonaMemUploader:
             content = " ".join(part for part in parts if part)
             if not content:
                 return []
-            return [{"role": "user", "content": content}]
+            message = {"role": "user", "content": content}
+            self._apply_speaker_metadata(message, parent_speaker, speaker_registry)
+            return [message]
 
         text = self._stringify(turn)
         if not text:
             return []
-        return [{"role": "user", "content": text}]
+        message = {"role": "user", "content": text}
+        self._apply_speaker_metadata(message, parent_speaker, speaker_registry)
+        return [message]
 
     def _resolve_role(self, turn: Dict[str, object]) -> str:
         for key in _ROLE_KEYS:
@@ -252,6 +419,67 @@ class PersonaMemUploader:
                     return "assistant"
                 return "user"
         return "user"
+
+    def _resolve_speaker_name(self, turn: Dict[str, object]) -> Optional[str]:
+        for key in ("name", "speaker", "author", "role"):
+            value = turn.get(key)
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned and not self._looks_like_role(cleaned):
+                    return cleaned
+        return None
+
+    def _apply_speaker_metadata(
+        self, message: Dict[str, object], speaker_name: Optional[str], speaker_registry: Dict[str, str]
+    ) -> None:
+        if not speaker_name:
+            return
+
+        speaker_id = self._assign_speaker_id(speaker_name, speaker_registry)
+        if not speaker_id:
+            return
+
+        message["speaker_id"] = speaker_id
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.setdefault("speaker_name", speaker_name.strip())
+        message["metadata"] = metadata
+
+    def _assign_speaker_id(self, speaker_name: str, speaker_registry: Dict[str, str]) -> Optional[str]:
+        key = self._normalise_speaker_key(speaker_name)
+        if not key:
+            return None
+
+        if key not in speaker_registry:
+            speaker_registry[key] = self._generate_speaker_id(speaker_name, speaker_registry.values())
+        return speaker_registry[key]
+
+    @staticmethod
+    def _normalise_speaker_key(speaker_name: str) -> str:
+        cleaned = re.sub(r"\s+", " ", speaker_name.casefold()).strip()
+        return cleaned
+
+    @staticmethod
+    def _generate_speaker_id(speaker_name: str, existing_ids: Iterable[str]) -> str:
+        slug = re.sub(r"[^0-9a-zA-Z]+", "_", speaker_name.strip().lower()).strip("_")
+        if not slug:
+            slug = "speaker"
+        if slug[0].isdigit():
+            slug = f"speaker_{slug}"
+
+        candidate = slug
+        counter = 2
+        existing = set(existing_ids)
+        while candidate in existing:
+            candidate = f"{slug}_{counter}"
+            counter += 1
+        return candidate
+
+    @staticmethod
+    def _looks_like_role(value: str) -> bool:
+        lowered = value.casefold()
+        return any(alias in lowered for alias in ("system", "assistant", "bot", "model", "ai", "user"))
 
     def _resolve_content(self, turn: Dict[str, object]) -> str:
         for key in _CONTENT_KEYS:
@@ -286,7 +514,7 @@ class PersonaMemUploader:
             return
         self._client.delete_all(user_id=persona_id)
 
-    def _add_messages(self, persona_id: str, messages: Sequence[Dict[str, str]], metadata: Dict[str, object]) -> None:
+    def _add_messages(self, persona_id: str, messages: Sequence[Dict[str, object]], metadata: Dict[str, object]) -> None:
         if self.config.dry_run or self._client is None:
             return
 
@@ -303,18 +531,41 @@ class PersonaMemUploader:
             )
 
 
+def run_personamem_search(config: PersonaMemConfig) -> None:
+    """Execute the Mem0 search pipeline mirroring ``run_experiments``."""
+
+    if not config.search_data_file:
+        raise ValueError("A dataset path must be provided when method is 'search'.")
+
+    os.makedirs(config.output_folder, exist_ok=True)
+
+    output_file_path = os.path.join(
+        config.output_folder,
+        f"mem0_results_top_{config.top_k}_filter_{config.filter_memories}_graph_{config.search_is_graph}.json",
+    )
+
+    memory_searcher = MemorySearch(
+        output_file_path,
+        config.top_k,
+        config.filter_memories,
+        config.search_is_graph,
+    )
+    memory_searcher.process_data_file(config.search_data_file)
+
+
 def parse_args() -> PersonaMemConfig:
     parser = argparse.ArgumentParser(description="Upload PersonaMem conversations to mem0")
+    parser.add_argument("--method", choices=METHODS, default="add", help="Method to execute.")
     parser.add_argument(
         "--questions-file",
         type=str,
-        default="dataset/PersonaMem/questions_32k.csv",
+        default=_DEFAULT_QUESTIONS_PATH,
         help="Path to the PersonaMem questions CSV file.",
     )
     parser.add_argument(
         "--contexts-file",
         type=str,
-        default="dataset/PersonaMem/shared_contexts_32k.jsonl",
+        default=_DEFAULT_CONTEXTS_PATH,
         help="Path to the PersonaMem shared contexts JSONL file.",
     )
     parser.add_argument(
@@ -345,6 +596,38 @@ def parse_args() -> PersonaMemConfig:
         action="store_true",
         help="Parse the dataset without making mem0 API calls.",
     )
+    parser.add_argument(
+        "--output-folder",
+        type=str,
+        default=_DEFAULT_OUTPUT_FOLDER,
+        help="Output directory for search results when using the 'search' method.",
+    )
+    parser.add_argument(
+        "--search-data-file",
+        type=str,
+        default=_DEFAULT_SEARCH_DATA_FILE,
+        help="Dataset JSON file to use for search evaluation.",
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=30,
+        help="Number of top memories to retrieve during search.",
+    )
+    parser.add_argument(
+        "--filter_memories",
+        action="store_true",
+        dest="filter_memories",
+        default=False,
+        help="Whether to filter memories during search.",
+    )
+    parser.add_argument(
+        "--is_graph",
+        action="store_true",
+        dest="search_is_graph",
+        default=False,
+        help="Use graph-based search when running the 'search' method.",
+    )
 
     args = parser.parse_args()
 
@@ -356,13 +639,22 @@ def parse_args() -> PersonaMemConfig:
         enable_graph=args.enable_graph,
         max_contexts=args.max_contexts,
         dry_run=args.dry_run,
+        method=args.method,
+        output_folder=args.output_folder,
+        search_data_file=args.search_data_file,
+        top_k=args.top_k,
+        filter_memories=args.filter_memories,
+        search_is_graph=args.search_is_graph,
     )
 
 
 def main() -> None:
     config = parse_args()
-    uploader = PersonaMemUploader(config)
-    uploader.run()
+    if config.method == "search":
+        run_personamem_search(config)
+    else:
+        uploader = PersonaMemUploader(config)
+        uploader.run()
 
 
 if __name__ == "__main__":
