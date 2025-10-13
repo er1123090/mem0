@@ -1,7 +1,7 @@
 """Upload the PersonaMem benchmark conversations to mem0 or run search evaluations.
 
 This script mirrors the behaviour of the existing Locomo uploader. It reads the
-PersonaMem question mapping (CSV) together with the shared contexts (JSONL),
+PersonaMem question mapping (CSV) together with the shared contexts (JSONL/JSON),
 normalises every conversation into the format expected by mem0, and finally
 stores the conversations for each persona. When executed with
 ``--method search`` it mirrors the search workflow provided by
@@ -125,7 +125,8 @@ class PersonaMemUploader:
 
         if missing_contexts:
             print(
-                "Warning: %d shared contexts were referenced in the questions file but missing from the JSONL." % len(missing_contexts)
+                "Warning: %d shared contexts were referenced in the questions file but missing from the JSONL."
+                % len(missing_contexts)
             )
             print("Missing context IDs: %s" % ", ".join(missing_contexts))
 
@@ -160,7 +161,7 @@ class PersonaMemUploader:
         return context_to_persona
 
     def _load_contexts(self, required_context_ids: Iterable[str]) -> Dict[str, Dict[str, object]]:
-        """Load the shared contexts JSONL file into a dictionary keyed by context id."""
+        """Load the shared contexts JSON/JSONL file into a dictionary keyed by context id."""
 
         contexts: Dict[str, Dict[str, object]] = {}
         required = set(required_context_ids)
@@ -179,7 +180,8 @@ class PersonaMemUploader:
         missing = required - contexts.keys()
         if missing:
             print(
-                "***Warning: %d contexts referenced in the questions file were not found in the JSONL file." % len(missing)
+                "***Warning: %d contexts referenced in the questions file were not found in the JSONL file."
+                % len(missing)
             )
 
         print(f"Loaded {len(contexts)} shared contexts from {self.config.contexts_path}")
@@ -227,7 +229,17 @@ class PersonaMemUploader:
 
     @staticmethod
     def _normalise_record_container(parsed: object) -> Iterator[Dict[str, object]]:
+        """
+        Normalise a parsed JSON container into per-record dicts.
+
+        Supports:
+          - {"data"/"contexts"/"records"/"items": [ {...}, ... ]}
+          - {"id": "...", "<TURN_KEYS>": [...]}
+          - {"<id1>": [ ... ], "<id2>": [ ... ]}  # id -> turns mapping
+          - Fallback: yield the dict/list items as-is (legacy compatibility)
+        """
         if isinstance(parsed, dict):
+            # 1) Typical container keys
             for key in ("data", "contexts", "records", "items"):
                 value = parsed.get(key)
                 if isinstance(value, list):
@@ -235,6 +247,33 @@ class PersonaMemUploader:
                         if isinstance(item, dict):
                             yield item
                     return
+
+            # 2) Already a single record
+            if "id" in parsed or "context_id" in parsed:
+                yield parsed
+                return
+
+            # 3) id -> messages/turns mapping
+            turn_keys = ("messages", "context", "turns", "conversation", "conversations")
+            emitted = False
+            for k, v in parsed.items():
+                # 3-a) value is directly a turns list
+                if isinstance(v, list):
+                    yield {"id": str(k), "messages": v}
+                    emitted = True
+                    continue
+                # 3-b) value is a dict that contains one of the turn keys as a list
+                if isinstance(v, dict):
+                    for tk in turn_keys:
+                        tv = v.get(tk)
+                        if isinstance(tv, list):
+                            yield {"id": str(k), "messages": tv}
+                            emitted = True
+                            break
+            if emitted:
+                return
+
+            # 4) Fallback: treat entire dict as one record (keep legacy behaviour)
             yield parsed
             return
 
@@ -327,10 +366,22 @@ class PersonaMemUploader:
 
     @staticmethod
     def _extract_context_id(record: Dict[str, object]) -> Optional[str]:
+        """
+        Extract a context id from a record. Supports:
+          - keys: shared_context_id / context_id / id
+          - single-key mapping: {"<id>": [...]}
+        """
         for key in ("shared_context_id", "context_id", "id"):
             value = record.get(key)
             if isinstance(value, str) and value:
                 return value
+
+        # Single-key dict like {"<id>": [...]} (value may be list or nested dict)
+        if isinstance(record, dict) and len(record) == 1:
+            only_key = next(iter(record.keys()))
+            if isinstance(only_key, str) and only_key:
+                return only_key
+
         return None
 
     # ------------------------------------------------------------------
@@ -567,7 +618,7 @@ def parse_args() -> PersonaMemConfig:
         "--contexts-file",
         type=str,
         default=_DEFAULT_CONTEXTS_PATH,
-        help="Path to the PersonaMem shared contexts JSONL file.",
+        help="Path to the PersonaMem shared contexts JSON/JSONL file.",
     )
     parser.add_argument(
         "--batch-size",
