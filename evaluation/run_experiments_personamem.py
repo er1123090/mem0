@@ -11,18 +11,23 @@ stores the conversations for each persona. When executed with
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import json
 import os
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from json import JSONDecodeError
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence
 
 from dotenv import load_dotenv
+from jinja2 import Template
 from tqdm import tqdm
 
 from mem0 import MemoryClient
+
+from prompts import ANSWER_PROMPT
 
 from src.memzero.add import custom_instructions
 from src.memzero.search import MemorySearch
@@ -31,7 +36,6 @@ from src.utils import METHODS
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_QUESTIONS_PATH = os.path.join(_SCRIPT_DIR, "dataset", "PersonaMem", "questions_32k.csv")
 _DEFAULT_CONTEXTS_PATH = os.path.join(_SCRIPT_DIR, "dataset", "PersonaMem", "shared_contexts_32k.jsonl")
-_DEFAULT_SEARCH_DATA_FILE = os.path.join(_SCRIPT_DIR, "dataset", "Locomo", "locomo10.json")
 _DEFAULT_OUTPUT_FOLDER = os.path.join(_SCRIPT_DIR, "results")
 
 # Fields that commonly contain the conversation payload in PersonaMem contexts.
@@ -63,10 +67,24 @@ class PersonaMemConfig:
     dry_run: bool = False
     method: str = "add"
     output_folder: str = _DEFAULT_OUTPUT_FOLDER
-    search_data_file: str = _DEFAULT_SEARCH_DATA_FILE
     top_k: int = 30
     filter_memories: bool = False
     search_is_graph: bool = False
+
+
+@dataclass
+class PersonaMemQuestion:
+    """Representation of a single PersonaMem evaluation question."""
+
+    persona_id: str
+    shared_context_id: str
+    question: str
+    answer: str
+    question_type: Optional[str] = None
+    question_id: Optional[str] = None
+    topic: Optional[str] = None
+    options: Optional[List[str]] = None
+    end_index_in_shared_context: Optional[int] = None
 
 
 class PersonaMemUploader:
@@ -117,10 +135,7 @@ class PersonaMemUploader:
             if not messages:
                 continue
 
-            metadata = {"shared_context_id": shared_context_id, "source": "PersonaMem"}
-            question = context_record.get("question")
-            if isinstance(question, str) and question.strip():
-                metadata["question"] = question.strip()
+            metadata = self._build_metadata(context_record, shared_context_id)
             self._add_messages(persona_id, messages, metadata)
 
         if missing_contexts:
@@ -129,6 +144,48 @@ class PersonaMemUploader:
                 % len(missing_contexts)
             )
             print("Missing context IDs: %s" % ", ".join(missing_contexts))
+
+    def _build_metadata(self, context_record: Dict[str, object], shared_context_id: str) -> Dict[str, object]:
+        metadata: Dict[str, object] = {"shared_context_id": shared_context_id, "source": "PersonaMem"}
+        question = context_record.get("question")
+        if isinstance(question, str) and question.strip():
+            metadata["question"] = question.strip()
+
+        timestamp = self._extract_timestamp_hint(context_record)
+        metadata.setdefault("timestamp", timestamp)
+        return metadata
+
+    def _extract_timestamp_hint(self, record: object) -> str:
+        """Best-effort extraction of a timestamp-like value from a record."""
+
+        candidate = self._find_timestamp_in_object(record)
+        if candidate:
+            return candidate
+        return "1970-01-01T00:00:00Z"
+
+    def _find_timestamp_in_object(self, value: object) -> Optional[str]:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                lowered = key.casefold()
+                if any(token in lowered for token in ("timestamp", "datetime", "date", "time")):
+                    text = self._stringify(nested)
+                    if text:
+                        return text
+                found = self._find_timestamp_in_object(nested)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = self._find_timestamp_in_object(item)
+                if found:
+                    return found
+        elif isinstance(value, (int, float)):
+            return str(value)
+        elif isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+        return None
 
     # ------------------------------------------------------------------
     # Data loading helpers
@@ -191,27 +248,48 @@ class PersonaMemUploader:
     def _iterate_context_records(self, path: str) -> Iterator[Dict[str, object]]:
         """Yield context records from JSON, JSONL, or lightly structured files."""
 
-        buffer = ""
-        lines: List[str] = []
-        any_record = False
         with open(path, "r", encoding="utf-8") as json_file:
-            for raw_line in json_file:
-                lines.append(raw_line)
-                stripped = raw_line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
+            raw_content = json_file.read()
 
-                buffer += raw_line
+        stripped_content = raw_content.strip()
+        if not stripped_content:
+            return
 
-                try:
-                    parsed = json.loads(buffer)
-                except JSONDecodeError:
-                    # The current buffer does not yet represent a full JSON object.
-                    continue
+        # First try to parse the entire file as JSON (supports standard JSON dumps).
+        parsed_container: Optional[object] = None
+        try:
+            parsed_container = json.loads(stripped_content)
+        except JSONDecodeError:
+            try:
+                parsed_container = ast.literal_eval(stripped_content)
+            except (SyntaxError, ValueError):
+                parsed_container = None
 
-                any_record = True
-                yield from self._normalise_record_container(parsed)
-                buffer = ""
+        if parsed_container is not None:
+            yield from self._normalise_record_container(parsed_container)
+            return
+
+        # Fall back to incremental parsing for JSONL or mixed files.
+        buffer = ""
+        lines = raw_content.splitlines(True)
+        any_record = False
+
+        for raw_line in lines:
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            buffer += raw_line
+
+            try:
+                parsed = json.loads(buffer)
+            except JSONDecodeError:
+                # The current buffer does not yet represent a full JSON object.
+                continue
+
+            any_record = True
+            yield from self._normalise_record_container(parsed)
+            buffer = ""
 
         if buffer.strip():
             try:
@@ -584,25 +662,139 @@ class PersonaMemUploader:
 
 
 def run_personamem_search(config: PersonaMemConfig) -> None:
-    """Execute the Mem0 search pipeline mirroring ``run_experiments``."""
-
-    if not config.search_data_file:
-        raise ValueError("A dataset path must be provided when method is 'search'.")
+    """Execute the Mem0 search pipeline for PersonaMem questions."""
 
     os.makedirs(config.output_folder, exist_ok=True)
 
     output_file_path = os.path.join(
         config.output_folder,
-        f"mem0_results_top_{config.top_k}_filter_{config.filter_memories}_graph_{config.search_is_graph}.json",
+        f"personamem_results_top_{config.top_k}_filter_{config.filter_memories}_graph_{config.search_is_graph}.json",
     )
 
-    memory_searcher = MemorySearch(
-        output_file_path,
-        config.top_k,
-        config.filter_memories,
-        config.search_is_graph,
-    )
-    memory_searcher.process_data_file(config.search_data_file)
+    search_runner = PersonaMemSearchRunner(config, output_file_path)
+    search_runner.run()
+
+
+class PersonaMemSearchRunner:
+    """Evaluate PersonaMem questions against memories stored in mem0."""
+
+    def __init__(self, config: PersonaMemConfig, output_path: str) -> None:
+        load_dotenv()
+        self.config = config
+        self.output_path = output_path
+        self.memory_searcher = MemorySearch(
+            output_path,
+            top_k=config.top_k,
+            filter_memories=config.filter_memories,
+            is_graph=config.search_is_graph,
+        )
+        self.results: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+
+    def run(self) -> None:
+        questions = list(self._load_questions())
+
+        if self.config.max_contexts is not None:
+            allowed_contexts = {
+                q.shared_context_id for q in questions[: self.config.max_contexts]
+            }
+            questions = [q for q in questions if q.shared_context_id in allowed_contexts]
+
+        for question in tqdm(questions, desc="Running PersonaMem search"):
+            self._process_question(question)
+
+        self._flush_results()
+
+    def _load_questions(self) -> Iterator[PersonaMemQuestion]:
+        with open(self.config.questions_path, "r", encoding="utf-8") as csv_file:
+            reader = csv.DictReader(csv_file)
+            for row in reader:
+                persona_id = (row.get("persona_id") or "").strip()
+                shared_context_id = (row.get("shared_context_id") or "").strip()
+                question_text = (row.get("user_question_or_message") or "").strip()
+                answer = (row.get("correct_answer") or "").strip()
+                if not persona_id or not shared_context_id or not question_text:
+                    continue
+
+                options_raw = row.get("all_options")
+                options = self._parse_options(options_raw)
+
+                try:
+                    end_index = int(row.get("end_index_in_shared_context", ""))
+                except ValueError:
+                    end_index = None
+
+                yield PersonaMemQuestion(
+                    persona_id=persona_id,
+                    shared_context_id=shared_context_id,
+                    question=question_text,
+                    answer=answer,
+                    question_type=(row.get("question_type") or "").strip() or None,
+                    question_id=(row.get("question_id") or "").strip() or None,
+                    topic=(row.get("topic") or "").strip() or None,
+                    options=options,
+                    end_index_in_shared_context=end_index,
+                )
+
+    @staticmethod
+    def _parse_options(raw_value: Optional[str]) -> Optional[List[str]]:
+        if raw_value is None:
+            return None
+        cleaned = raw_value.strip()
+        if not cleaned:
+            return None
+        try:
+            parsed = json.loads(cleaned)
+        except JSONDecodeError:
+            parsed = [part.strip() for part in cleaned.split("|") if part.strip()]
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        return [str(parsed).strip()]
+
+    def _process_question(self, question: PersonaMemQuestion) -> None:
+        semantic_memories, graph_memories, search_time = self.memory_searcher.search_memory(
+            question.persona_id, question.question
+        )
+
+        speaker_memories = [f"{item['timestamp']}: {item['memory']}" for item in semantic_memories]
+        speaker_graph_memories = graph_memories or []
+
+        template = Template(ANSWER_PROMPT)
+        answer_prompt = template.render(
+            speaker_1_user_id=question.persona_id,
+            speaker_2_user_id="assistant",
+            speaker_1_memories=json.dumps(speaker_memories, ensure_ascii=False, indent=4),
+            speaker_2_memories="[]",
+            speaker_1_graph_memories=json.dumps(speaker_graph_memories, ensure_ascii=False, indent=4),
+            speaker_2_graph_memories="[]",
+            question=question.question,
+        )
+
+        response = self.memory_searcher.openai_client.chat.completions.create(
+            model=os.getenv("MODEL"), messages=[{"role": "system", "content": answer_prompt}], temperature=0.0
+        )
+
+        result = {
+            "question": question.question,
+            "answer": question.answer,
+            "question_id": question.question_id,
+            "question_type": question.question_type,
+            "topic": question.topic,
+            "persona_id": question.persona_id,
+            "shared_context_id": question.shared_context_id,
+            "options": question.options,
+            "end_index_in_shared_context": question.end_index_in_shared_context,
+            "response": response.choices[0].message.content,
+            "semantic_memories": semantic_memories,
+            "graph_memories": graph_memories,
+            "search_time": search_time,
+        }
+
+        self.results[question.persona_id].append(result)
+        self._flush_results()
+
+    def _flush_results(self) -> None:
+        with open(self.output_path, "w", encoding="utf-8") as outfile:
+            json.dump(self.results, outfile, ensure_ascii=False, indent=2)
 
 
 def parse_args() -> PersonaMemConfig:
@@ -655,12 +847,6 @@ def parse_args() -> PersonaMemConfig:
         help="Output directory for search results when using the 'search' method.",
     )
     parser.add_argument(
-        "--search-data-file",
-        type=str,
-        default=_DEFAULT_SEARCH_DATA_FILE,
-        help="Dataset JSON file to use for search evaluation.",
-    )
-    parser.add_argument(
         "--top_k",
         type=int,
         default=30,
@@ -693,7 +879,6 @@ def parse_args() -> PersonaMemConfig:
         dry_run=args.dry_run,
         method=args.method,
         output_folder=args.output_folder,
-        search_data_file=args.search_data_file,
         top_k=args.top_k,
         filter_memories=args.filter_memories,
         search_is_graph=args.search_is_graph,
