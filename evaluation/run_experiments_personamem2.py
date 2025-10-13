@@ -13,11 +13,8 @@ from __future__ import annotations
 import argparse
 import os
 
-from run_experiments_personamem import (
-    PersonaMemConfig,
-    PersonaMemUploader,
-    run_personamem_search,
-)
+from src.memzero.personamemadd import PersonaMemConfig, PersonaMemUploader
+from src.memzero.personasearch import run_personamem_search
 from src.utils import METHODS
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
