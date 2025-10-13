@@ -27,5 +27,13 @@ run-zep-add-locomo:
 run-zep-search-locomo:
 	python run_experiments_locomo.py --technique_type zep --method search --output_folder results/
 
+run-openai:
+	python run_experiments.py --technique_type openai --output_folder results/
+
+run-personamem-add:
+	python run_experiments_personamem.py --questions-file dataset/PersonaMem/questions_32k.csv --contexts-file dataset/PersonaMem/shared_contexts_32k.jsonl
+
+run-personamem-dry-run:
+	python run_experiments_personamem.py --questions-file dataset/PersonaMem/questions_32k.csv --contexts-file dataset/PersonaMem/shared_contexts_32k.jsonl --dry-run
 run-openai-locomo:
 	python run_experiments_locomo.py --technique_type openai --output_folder results/
