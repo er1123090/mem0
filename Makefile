@@ -52,4 +52,7 @@ test-py-3.11:
 	hatch run dev_py_3_11:test
 
 test-py-3.12:
-	hatch run dev_py_3_12:test
+        hatch run dev_py_3_12:test
+
+personamem-search:
+        $(MAKE) -C evaluation personamem-search
