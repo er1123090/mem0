@@ -1,33 +1,3 @@
-{
-  "$schema": "https://json.schemastore.org/tsconfig",
-  "compilerOptions": {
-    "target": "ES2018",
-    "module": "ESNext",
-    "lib": ["dom", "ES2021", "dom.iterable"],
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "strict": true,
-    "moduleResolution": "node",
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "composite": false,
-    "types": ["@types/node"],
-    "jsx": "react-jsx",
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
-    "preserveWatchOutput": true,
-    "inlineSources": false,
-    "isolatedModules": true,
-    "stripInternal": true,
-    "paths": {
-      "@/*": ["./src/*"]
-    }
-  },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts"]
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:e3a0e584f43963a8a6d82c8898bc42e8f0b30220ec2e6a2427fb35f2a8b68002
+size 872

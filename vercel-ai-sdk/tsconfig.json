@@ -1,29 +1,3 @@
-{
-    "$schema": "https://json.schemastore.org/tsconfig",
-    "compilerOptions": {
-      "composite": false,
-      "declaration": true,
-      "declarationMap": true,
-      "esModuleInterop": true,
-      "forceConsistentCasingInFileNames": true,
-      "inlineSources": false,
-      "isolatedModules": true,
-      "moduleResolution": "node16",
-      "noUnusedLocals": false,
-      "noUnusedParameters": false,
-      "preserveWatchOutput": true,
-      "skipLibCheck": true,
-      "strict": true,
-      "types": ["@types/node", "jest"],
-      "jsx": "react-jsx",
-      "lib": ["dom", "ES2021"],
-      "module": "Node16",
-      "target": "ES2018",
-      "stripInternal": true,
-      "paths": {
-        "@/*": ["./src/*"]
-      }
-    },
-    "include": ["."],
-    "exclude": ["dist", "build", "node_modules"]
-  }
+version https://git-lfs.github.com/spec/v1
+oid sha256:022e15fb6a3122568f617aa3f52a6b6c7131967514a8b8f6c9d1edd06705b95e
+size 805
