@@ -161,7 +161,7 @@ class PersonaMemUploader:
         candidate = self._find_timestamp_in_object(record)
         if candidate:
             return candidate
-        return "1970-01-01T00:00:00Z"
+        return "0000-01-01T00:00:00Z"
 
     def _find_timestamp_in_object(self, value: object) -> Optional[str]:
         if isinstance(value, dict):
